@@ -1,1 +1,7 @@
 双击我.exe
+/target/
+/dist/
+/backups/
+/.build-tools/
+/Nioh3SaveCertificateTool/.nioh3-save-manager.lock
+/__pycache__/

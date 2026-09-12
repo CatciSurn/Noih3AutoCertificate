@@ -1,0 +1,21 @@
+[package]
+name = "nioh3-save-manager"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+description = "仁王 3 存档改签助手：自动发现账号并备份存档"
+publish = false
+
+[lib]
+name = "nioh3_save_manager"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nioh3-save-manager"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
