@@ -35,7 +35,7 @@ try {
     $executable = Join-Path $projectRoot 'target\release\nioh3-save-manager.exe'
     Copy-Item -LiteralPath $executable -Destination (Join-Path $distribution '双击我.exe') -Force
     Copy-Item -LiteralPath $executable -Destination (Join-Path $projectRoot '双击我.exe') -Force
-    foreach ($name in @('HandMakeSave', 'MagicMakeSave')) {
+    foreach ($name in @('HandMakeSave', 'MagicMakeSave', 'CustomSave')) {
         $source = Join-Path $projectRoot $name
         Copy-Item -LiteralPath $source -Destination $distribution -Recurse -Force
     }

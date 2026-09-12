@@ -16,6 +16,7 @@ struct Options {
     assets: Option<PathBuf>,
     savedata_root: Option<PathBuf>,
     steam_dir: Option<PathBuf>,
+    source_dir: Option<PathBuf>,
     account: Option<String>,
     check: bool,
     preview_confirmation: bool,
@@ -31,7 +32,9 @@ impl Options {
                 Some("--check") => options.check = true,
                 Some("--preview-confirmation") => options.preview_confirmation = true,
                 Some("--help" | "-h") => options.help = true,
-                Some("--assets" | "--savedata-root" | "--steam-dir" | "--account") => {
+                Some(
+                    "--assets" | "--savedata-root" | "--steam-dir" | "--source-dir" | "--account",
+                ) => {
                     let value = args
                         .next()
                         .ok_or_else(|| format!("参数 {} 缺少值。", arg.to_string_lossy()))?;
@@ -42,6 +45,7 @@ impl Options {
                         "--assets" => options.assets = Some(value.into()),
                         "--savedata-root" => options.savedata_root = Some(value.into()),
                         "--steam-dir" => options.steam_dir = Some(value.into()),
+                        "--source-dir" => options.source_dir = Some(value.into()),
                         _ => {
                             let id = value.into_string().map_err(|_| "账号必须是数字。")?;
                             if !id.bytes().all(|b| b.is_ascii_digit()) {
@@ -88,9 +92,10 @@ fn run(options: Options) -> Result<()> {
              用法：nioh3-save-manager.exe [选项]\n\n\
              --check                 只检查路径和资源，不关闭 Steam、不修改任何文件\n\
              --preview-confirmation  仅预览确认弹窗，关闭后退出，不执行存档操作\n\
-             --assets <目录>         image.png 和三个资源目录所在的位置\n\
+             --assets <目录>         image.png 和存档资源目录所在的位置\n\
              --savedata-root <目录>  包含各账号数字子目录的 Savedata 根目录\n\
              --account <数字目录名>  明确指定已有账号；否则自动发现并在多账号时选择\n\
+             --source-dir <目录>     使用自定义存档；目录内需包含 SYSTEMSAVEDATA00 和 SAVEDATA00\n\
              --steam-dir <目录>      Steam 安装目录（自动查找失败时使用）\n\
              --help, -h              显示帮助\n\n\
              默认存档位置：%LOCALAPPDATA%\\KoeiTecmo\\NIOH3\\Savedata\n\
@@ -129,7 +134,12 @@ fn run(options: Options) -> Result<()> {
         ));
     }
     if options.check {
-        return check_paths(&asset_root, &accounts, options.account.as_deref());
+        return check_paths(
+            &asset_root,
+            &accounts,
+            options.account.as_deref(),
+            options.source_dir.as_deref(),
+        );
     }
     if !cfg!(windows) {
         return Err("交互改签流程仅支持 Windows。".into());
@@ -138,11 +148,17 @@ fn run(options: Options) -> Result<()> {
         println!("已取消，未修改存档。");
         return Ok(());
     };
-    let Some(kind) = select_save_kind()? else {
-        println!("已取消，未修改存档。");
-        return Ok(());
+    let kind = match &options.source_dir {
+        Some(directory) => custom_save_kind(directory)?,
+        None => {
+            let Some(kind) = select_save_kind(&asset_root)? else {
+                println!("已取消，未修改存档。");
+                return Ok(());
+            };
+            kind
+        }
     };
-    let plan = SavePlan::new(&asset_root, &account.path, kind)?;
+    let plan = SavePlan::new(&asset_root, &account.path, kind.clone())?;
     println!("\n选中账号：{}", account.id);
     println!("目标目录：{}", account.path.display());
     println!("存档类型：{}", kind.label());
@@ -205,17 +221,26 @@ fn run(options: Options) -> Result<()> {
     Ok(())
 }
 
-fn check_paths(root: &Path, accounts: &[Account], requested: Option<&str>) -> Result<()> {
+fn check_paths(
+    root: &Path,
+    accounts: &[Account],
+    requested: Option<&str>,
+    source_dir: Option<&Path>,
+) -> Result<()> {
     println!("\n只读检查：不会启动改签工具或修改 Steam/存档。");
     let candidates: Vec<_> = match requested {
         Some(id) => vec![find_account(accounts, id)?],
         None => accounts.iter().collect(),
     };
+    let kinds = match source_dir {
+        Some(directory) => vec![custom_save_kind(directory)?],
+        None => vec![SaveKind::Hand, SaveKind::Magic],
+    };
     let mut failed = false;
     for account in candidates {
         println!("\n账号 {}：{}", account.id, account.path.display());
-        for kind in [SaveKind::Hand, SaveKind::Magic] {
-            match SavePlan::new(root, &account.path, kind) {
+        for kind in &kinds {
+            match SavePlan::new(root, &account.path, kind.clone()) {
                 Ok(_) => println!("  {}：路径检查通过", kind.label()),
                 Err(error) => {
                     println!("  {}：{error}", kind.label());
@@ -274,17 +299,68 @@ fn select_account(accounts: &[Account], requested: Option<&str>) -> Result<Optio
     }
 }
 
-fn select_save_kind() -> Result<Option<SaveKind>> {
-    println!("\n1. 手搓存档（原作者推荐）\n2. 魔改存档");
+fn select_save_kind(asset_root: &Path) -> Result<Option<SaveKind>> {
+    println!("\n1. 手搓存档（原作者推荐）\n2. 魔改存档\n3. 自定义存档（使用你自己准备的存档）");
     loop {
-        let value = read_line("请选择 1 或 2（q 或直接回车取消）：")?;
+        let value = read_line("请选择 1、2 或 3（q 或直接回车取消）：")?;
         match value.as_str() {
             "1" => return Ok(Some(SaveKind::Hand)),
             "2" => return Ok(Some(SaveKind::Magic)),
+            "3" => return select_custom_save_kind(asset_root),
             _ if cancelled(&value) => return Ok(None),
-            _ => println!("请输入 1 或 2。"),
+            _ => println!("请输入 1、2 或 3。"),
         }
     }
+}
+
+fn select_custom_save_kind(asset_root: &Path) -> Result<Option<SaveKind>> {
+    let default_dir = asset_root.join("CustomSave");
+    println!(
+        "\n自定义存档需要包含 SYSTEMSAVEDATA00 和 SAVEDATA00 两个文件夹，以及各自的 SAVEDATA.BIN。"
+    );
+    println!("默认存放位置：{}", default_dir.display());
+    loop {
+        let value =
+            read_line("请输入存档文件夹路径（可直接拖入文件夹；直接回车使用默认位置；q 取消）：")?;
+        if value.eq_ignore_ascii_case("q") {
+            return Ok(None);
+        }
+        let entered = strip_quotes(&value);
+        let candidate = if entered.is_empty() {
+            default_dir.clone()
+        } else {
+            PathBuf::from(entered)
+        };
+        let candidate = std::path::absolute(&candidate)
+            .map_err(|e| format!("无法解析路径 {}：{e}", candidate.display()))?;
+        match SavePlan::validate_source(&candidate) {
+            Ok(()) => return Ok(Some(SaveKind::Custom(candidate))),
+            Err(error) => {
+                println!("此文件夹不能用作自定义存档：{error}\n请放入正确的存档文件，或输入其他文件夹路径。")
+            }
+        }
+    }
+}
+
+fn custom_save_kind(directory: &Path) -> Result<SaveKind> {
+    let directory = std::path::absolute(directory)
+        .map_err(|e| format!("无法解析自定义存档路径 {}：{e}", directory.display()))?;
+    SavePlan::validate_source(&directory)
+        .map_err(|error| format!("自定义存档目录不可用：{error}"))?;
+    Ok(SaveKind::Custom(directory))
+}
+
+fn strip_quotes(value: &str) -> &str {
+    let value = value.trim();
+    for quote in ['"', '\''] {
+        if let Some(inner) = value
+            .strip_prefix(quote)
+            .and_then(|inner| inner.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    value
 }
 
 fn read_line(prompt: &str) -> Result<String> {
@@ -417,6 +493,23 @@ mod tests {
         assert!(options.check);
         assert_eq!(options.assets.unwrap(), PathBuf::from("E:\\中文 资源"));
         assert_eq!(options.account.as_deref(), Some("76561199999999999"));
+    }
+
+    #[test]
+    fn parses_custom_source_directory() {
+        let options = parse(&["--source-dir", "D:\\我的 存档"]).unwrap();
+        assert_eq!(options.source_dir.unwrap(), PathBuf::from("D:\\我的 存档"));
+        assert!(parse(&["--source-dir"]).is_err());
+        assert!(parse(&["--source-dir", ""]).is_err());
+    }
+
+    #[test]
+    fn strips_quotes_from_dragged_or_pasted_paths() {
+        assert_eq!(strip_quotes("\"D:\\我的 存档\""), "D:\\我的 存档");
+        assert_eq!(strip_quotes("'D:\\我的 存档'"), "D:\\我的 存档");
+        assert_eq!(strip_quotes("D:\\我的 存档"), "D:\\我的 存档");
+        assert_eq!(strip_quotes(""), "");
+        assert_eq!(strip_quotes("\""), "\"");
     }
 
     #[test]

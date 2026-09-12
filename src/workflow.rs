@@ -9,24 +9,27 @@ const SAVE_FILE: &str = "SAVEDATA.BIN";
 const SYSTEM_DIR: &str = "SYSTEMSAVEDATA00";
 const CHARACTER_DIR: &str = "SAVEDATA00";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum SaveKind {
     Hand,
     Magic,
+    Custom(PathBuf),
 }
 
 impl SaveKind {
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            Self::Hand => "手搓存档",
-            Self::Magic => "魔改存档",
+            Self::Hand => "手搓存档".to_owned(),
+            Self::Magic => "魔改存档".to_owned(),
+            Self::Custom(path) => format!("自定义存档（{}）", path.display()),
         }
     }
 
-    fn directory(self) -> &'static str {
+    pub fn source_dir(&self, asset_root: &Path) -> PathBuf {
         match self {
-            Self::Hand => "HandMakeSave",
-            Self::Magic => "MagicMakeSave",
+            Self::Hand => asset_root.join("HandMakeSave"),
+            Self::Magic => asset_root.join("MagicMakeSave"),
+            Self::Custom(path) => path.clone(),
         }
     }
 }
@@ -42,11 +45,22 @@ pub struct SavePlan {
 }
 
 impl SavePlan {
+    /// Validate a chosen source save directory (bundled or custom) before any
+    /// plan exists, so the interactive menu can re-prompt on a wrong folder.
+    pub fn validate_source(source_dir: &Path) -> Result<()> {
+        require_directory(source_dir)?;
+        for directory in [SYSTEM_DIR, CHARACTER_DIR] {
+            require_directory(&source_dir.join(directory))?;
+            require_nonempty_file(&source_dir.join(directory).join(SAVE_FILE))?;
+        }
+        Ok(())
+    }
+
     /// Validate everything before Steam is stopped or any file is changed.
     pub fn new(asset_root: &Path, account_dir: &Path, kind: SaveKind) -> Result<Self> {
         require_directory(asset_root)?;
         require_directory(account_dir)?;
-        let source_dir = asset_root.join(kind.directory());
+        let source_dir = kind.source_dir(asset_root);
         let tool_dir = asset_root.join("Nioh3SaveCertificateTool");
         let plan = Self {
             source_dir,
@@ -56,13 +70,9 @@ impl SavePlan {
             other_dir: tool_dir.join("别人存档扔里面"),
             tool_dir,
         };
-        require_directory(&plan.source_dir)?;
+        Self::validate_source(&plan.source_dir)?;
         require_directory(&plan.tool_dir)?;
         require_nonempty_file(&plan.tool_exe)?;
-        for directory in [SYSTEM_DIR, CHARACTER_DIR] {
-            require_directory(&plan.source_dir.join(directory))?;
-            require_nonempty_file(&plan.source_dir.join(directory).join(SAVE_FILE))?;
-        }
         require_directory(&plan.account_dir.join(SYSTEM_DIR))?;
         require_nonempty_file(&plan.account_dir.join(SYSTEM_DIR).join(SAVE_FILE))?;
         optional_directory(&plan.account_dir.join(CHARACTER_DIR))?;
@@ -474,10 +484,14 @@ mod tests {
                 NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
             ));
             let account = root.join("accounts").join("76561198000000099");
-            for (kind, data) in [(SaveKind::Hand, b"hand"), (SaveKind::Magic, b"mods")] {
+            for (directory_name, data) in [
+                ("HandMakeSave", b"hand".as_slice()),
+                ("MagicMakeSave", b"mods".as_slice()),
+                ("CustomSave", b"custom".as_slice()),
+            ] {
                 for directory in [SYSTEM_DIR, CHARACTER_DIR] {
                     write(
-                        &root.join(kind.directory()).join(directory).join(SAVE_FILE),
+                        &root.join(directory_name).join(directory).join(SAVE_FILE),
                         data,
                     );
                 }
@@ -610,6 +624,85 @@ mod tests {
                 b"my-character"
             );
         }
+    }
+
+    #[test]
+    fn save_kind_labels_and_source_directories_cover_custom_saves() {
+        assert_eq!(SaveKind::Hand.label(), "手搓存档");
+        assert_eq!(SaveKind::Magic.label(), "魔改存档");
+        let root = Path::new("assets");
+        assert_eq!(
+            SaveKind::Hand.source_dir(root),
+            Path::new("assets").join("HandMakeSave")
+        );
+        assert_eq!(
+            SaveKind::Magic.source_dir(root),
+            Path::new("assets").join("MagicMakeSave")
+        );
+        let custom = PathBuf::from("D:\\我的存档");
+        assert_eq!(SaveKind::Custom(custom.clone()).source_dir(root), custom);
+        assert!(SaveKind::Custom(custom).label().contains("我的存档"));
+    }
+
+    #[test]
+    fn custom_source_save_is_signed_and_replaces_local_saves() {
+        let fixture = Fixture::new();
+        let custom = fixture.root.join("CustomSave");
+        SavePlan::validate_source(&custom).unwrap();
+        let plan = fixture.plan(SaveKind::Custom(custom));
+        write(&plan.mine_dir.join(SAVE_FILE), b"bundled-mine");
+        let mut calls = 0;
+        plan.execute(&fixture.backup(), |_, _, stage| {
+            calls += 1;
+            assert!(stage.contains(if calls == 1 {
+                SYSTEM_DIR
+            } else {
+                CHARACTER_DIR
+            }));
+            assert_eq!(read(&plan.mine_dir.join(SAVE_FILE)), b"my-system");
+            assert_eq!(read(&plan.other_dir.join(SAVE_FILE)), b"custom");
+            fixture.assert_local_unchanged();
+            write(
+                &plan.other_dir.join(SAVE_FILE),
+                format!("custom-signed-{calls}").as_bytes(),
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(
+            read(&fixture.account.join(SYSTEM_DIR).join(SAVE_FILE)),
+            b"custom-signed-1"
+        );
+        assert_eq!(
+            read(&fixture.account.join(CHARACTER_DIR).join(SAVE_FILE)),
+            b"custom-signed-2"
+        );
+        assert_eq!(read(&plan.mine_dir.join(SAVE_FILE)), b"bundled-mine");
+    }
+
+    #[test]
+    fn invalid_custom_source_is_rejected_before_any_change() {
+        let fixture = Fixture::new();
+        let empty = fixture.root.join("empty-custom");
+        fs::create_dir_all(&empty).unwrap();
+        for path in [&empty, &fixture.root.join("missing-custom")] {
+            let error = SavePlan::validate_source(path).unwrap_err();
+            assert!(error.contains(&path.display().to_string()));
+            let error = SavePlan::new(
+                &fixture.root,
+                &fixture.account,
+                SaveKind::Custom(path.clone()),
+            )
+            .unwrap_err();
+            assert!(error.contains(&path.display().to_string()));
+            fixture.assert_local_unchanged();
+        }
+        assert!(!fixture
+            .root
+            .join("Nioh3SaveCertificateTool")
+            .join("你的存档扔里面")
+            .exists());
     }
 
     #[test]

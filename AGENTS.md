@@ -1,48 +1,48 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
-
-- `main.py` contains the Windows-only workflow: Tkinter confirmation, Steam Cloud configuration, external signing-tool execution, and save replacement.
-- `image.png` is the confirmation-screen reference image.
-- `HandMakeSave/` and `MagicMakeSave/` contain alternative save sets, each with `SAVEDATA00/SAVEDATA.BIN` and `SYSTEMSAVEDATA00/SAVEDATA.BIN`.
-- `Nioh3SaveCertificateTool/` contains the signing executable and the `别人存档扔里面/` and `你的存档扔里面/` staging directories. Preserve these names; code references them directly.
-- `requirements.txt` lists Pillow and PyInstaller. No separate source package, test directory, or CI configuration exists.
+Windows-only Chinese tool 仁王 3 存档改签助手 (Nioh 3 save re-signing assistant), rewritten from Python to Rust. `README.md` is the user-facing Chinese doc; update it when behavior changes.
 
 ## Build, Test, and Development Commands
 
-Run commands from the repository root in PowerShell. Use Miniconda's `base` environment for all Python and package operations:
-
 ```powershell
-conda activate base
-python -m pip install -r requirements.txt
-python -m py_compile main.py
-python main.py
+cargo fmt --check
+cargo test --offline --locked
+cargo build --release --offline --locked
+.\build.ps1 -Test   # tests, then fills dist/ and updates root 双击我.exe
 ```
 
-Installation provides dependencies; `py_compile` checks syntax without launching the workflow; `main.py` starts the interactive application.
+- Rust 1.85+ / edition 2021. There are zero external crates (empty `Cargo.lock`); Win32 APIs are called via raw `extern "system"` FFI. Do not add dependencies casually.
+- `build.ps1` prefers the portable `.build-tools/rustup/toolchains/1.85.0-x86_64-pc-windows-gnu`, otherwise the configured Cargo; it never installs or modifies system toolchains.
+- Safe verification that never touches saves: `cargo run -- --check` (read-only, exit 1 on failure) and `cargo run -- --preview-confirmation` (dialog only). Asset discovery walks up to 5 parent directories of the exe plus cwd, so running from `target/debug` works.
+- Never use the full interactive workflow as a smoke test: it force-closes Steam, edits `sharedconfig.vdf`, and overwrites real saves. Manual checks need disposable save copies.
 
-There is no checked-in build script or PyInstaller specification. An example console-enabled build is:
+## Layout and Platform Quirks
 
-```powershell
-python -m PyInstaller --onefile --name "双击我" main.py
-```
+- `src/main.rs` CLI parsing, Chinese prompts, Steam process control, backup dir allocation, console UTF-8 code page. Custom saves come from menu option 3 (`<assets>/CustomSave`, Enter accepts the default, quoted drag-and-drop paths are stripped) or `--source-dir`; `--check --source-dir` validates that folder instead of the two bundled ones.
+- `src/confirmation.rs` native Win32 modal dialog with GDI+ image rendering (`gdiplus.dll` loaded dynamically).
+- `src/signer.rs` runs the bundled signer with inherited stdin (it prompts/`pause`s) and transcodes its GBK/CP936 stdout+stderr to UTF-8. Do not replace this with console code-page changes.
+- `src/steam.rs` SteamID64 → account mapping (base `76561197960265728`), format-preserving VDF editing of `sharedconfig.vdf`.
+- `src/workflow.rs` preflight, backups, two signing rounds, writeback, rollback, tool lock. `SaveKind::Custom(PathBuf)` reuses the bundled pipeline with a player-supplied source directory; `SavePlan::validate_source` is the shared source-dir check.
+- `src/paths.rs` numeric account discovery, asset root discovery, `LOCALAPPDATA`/`USERPROFILE` fallback.
+- Chinese names are load-bearing: `HandMakeSave`, `MagicMakeSave`, `Nioh3SaveCertificateTool`, `双击我改签v0.5.exe`, `你的存档扔里面`, `别人存档扔里面`. Do not rename.
+- Windows behavior is `#[cfg(windows)]`; non-Windows stubs return Chinese errors. `src/lib.rs` defines `Result<T> = std::result::Result<T, String>`; messages and test assertions are Chinese.
+- Nioh 3 Steam AppID `4198760` is hardcoded in `main.rs`.
 
-Place `dist/双击我.exe` beside `image.png` and the three asset directories before running. Keep console support because the application uses `input()`.
+## Workflow Invariants (tests pin these)
 
-## Coding Style & Naming Conventions
+- Two rounds in order: `SYSTEMSAVEDATA00`, then `SAVEDATA00`. Before each round the user's original local SYSTEM save is restored as the signer identity, even if the signer changed the staging copy.
+- Local saves are written only after both rounds are confirmed and their bytes are unchanged during signing; any change aborts writeback and preserves the newer file.
+- Bundled staging files are backed up and restored afterwards; staging directories created by the run are removed.
+- Backups go to `backups/<account>/<timestamp>-<pid>-<n>/` and never overwrite existing files (`create_new`).
+- `.nioh3-save-manager.lock` with Windows `share_mode(0)` enforces one run per tool dir; a stale lock file is harmless.
+- File replacements write a temp file then rename; Steam config is backed up before the first edit.
 
-Use four-space indentation, `snake_case` functions and variables, and `UPPER_SNAKE_CASE` module constants. Preserve the existing Chinese interface text and UTF-8 encoding. Construct paths with `os.path.join` and retain script/executable compatibility through `get_script_dir()`. Keep changes focused; no formatter or linter is configured.
+## Testing
 
-## Testing Guidelines
+- Tests are inline `#[cfg(test)]` modules using temp directories and fake signer callbacks; never launch the real signer or touch real saves. Single test: `cargo test --offline --locked <name>`.
+- Manual checks must cover cancel, both bundled save choices plus the custom folder, missing files, and signer completion.
 
-No automated framework or coverage threshold is configured. Run the syntax check above for Python changes. For new automated tests, use standard-library `unittest`, name files `tests/test_*.py`, and run `python -m unittest discover -s tests`. Use temporary save directories and mock subprocess calls.
+## Repo Notes
 
-For manual checks, cover cancellation, both save choices, missing files, and signing-tool completion using disposable save copies.
-
-## Commit & Pull Request Guidelines
-
-History contains one commit, `完成基本功能`; no formal convention is established. Write short, descriptive commit subjects. PRs should explain behavior changes, validation performed, and affected paths; link relevant issues and include screenshots for GUI changes. Exclude generated builds and unintended binary-save changes.
-
-## Configuration & Save Safety
-
-Review the hardcoded account directory in `NIOH3_LOCAL_BASE` before local execution. The workflow force-closes Steam, edits `sharedconfig.vdf`, and overwrites saves without automatic backups. Back up configuration and saves before manual testing; never use the full workflow as an automated smoke test.
+- Generated/ignored: `target/`, `dist/`, `backups/`, `.build-tools/`, root `双击我.exe`, `.nioh3-save-manager.lock`.
+- Keep commit subjects short and descriptive; history is a mix of Chinese and English.
